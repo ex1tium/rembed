@@ -482,17 +482,25 @@ func SiLU(x []float32) {
 
 // GELUTanh applies the tanh-approximation GELU in place, matching PyTorch's
 // gelu(approximate="tanh") and HF's "gelu_pytorch_tanh" (Gemma's GeGLU
-// activation): 0.5·x·(1+tanh(√(2/π)·(x+0.044715·x³))). The tanh is computed
-// via float64 (like SiLU) for accuracy — torch does this in float32, so the
-// gap is well under the 1e-4 golden tolerance. Distinct from the erf-based
-// GELU: the two differ by up to ~1e-3, which across 24 layers would exceed
-// tolerance, so Gemma must use this variant.
+// activation): 0.5·x·(1+tanh(u)) with u = √(2/π)·(x+0.044715·x³). Distinct
+// from the erf-based GELU: the two differ by up to ~1e-3, which across 24
+// layers would exceed tolerance, so Gemma must use this variant.
+//
+// 0.5·(1+tanh(u)) is the logistic σ(2u), so the activation is x·σ(2u),
+// evaluated with the inlinable float32 expNonPos on −2|u| (never overflows):
+// x/(1+e) for u ≥ 0, x·e/(1+e) for u < 0. The float64 math.Tanh it replaces
+// was ~25% of an EmbeddingGemma forward pass; this tracks it within ~1e-6
+// (pinned in fastmath_test.go), far inside the 1e-4 golden tolerance.
 func GELUTanh(x []float32) {
-	const c = 0.7978845608028654 // √(2/π)
+	const c = float32(0.7978845608028654) // √(2/π)
 	for i, v := range x {
-		v64 := float64(v)
-		inner := c * (v64 + 0.044715*v64*v64*v64)
-		x[i] = float32(0.5 * v64 * (1 + math.Tanh(inner)))
+		u := c * (v + 0.044715*v*v*v)
+		if u >= 0 {
+			x[i] = v / (1 + expNonPos(-2*u))
+		} else {
+			e := expNonPos(2 * u)
+			x[i] = v * e / (1 + e)
+		}
 	}
 }
 

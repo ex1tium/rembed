@@ -96,3 +96,28 @@ func BenchmarkErff32(b *testing.B) {
 	}
 	_ = s
 }
+
+// TestGELUTanhAgainstFloat64 pins the float32 σ(2u) form of GELUTanh to the
+// float64 0.5·x·(1+tanh(u)) definition across the range activations reach,
+// including the far tails where one branch underflows to x or 0.
+func TestGELUTanhAgainstFloat64(t *testing.T) {
+	var xs []float32
+	for x := float32(-30); x <= 30; x += 0.0005 {
+		xs = append(xs, x)
+	}
+	xs = append(xs, 0, -1e-30, 1e-30, -100, 100)
+	got := append([]float32(nil), xs...)
+	GELUTanh(got)
+	var worst float64
+	for i, v := range xs {
+		v64 := float64(v)
+		want := 0.5 * v64 * (1 + math.Tanh(0.7978845608028654*(v64+0.044715*v64*v64*v64)))
+		// Relative to max(|want|, 1): absolute near zero, relative in the tails.
+		d := math.Abs(float64(got[i])-want) / math.Max(math.Abs(want), 1)
+		worst = math.Max(worst, d)
+		if d > 1e-6 || math.IsNaN(float64(got[i])) {
+			t.Fatalf("GELUTanh(%v)=%v want %v (err %g > 1e-6)", v, got[i], want, d)
+		}
+	}
+	t.Logf("worst scaled error %.3g", worst)
+}
