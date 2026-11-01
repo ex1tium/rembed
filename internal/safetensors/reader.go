@@ -122,6 +122,38 @@ func (r *Reader) Shape(name string) ([]int, bool) {
 	return e.shape, true
 }
 
+// BF16 copies tensor `name` out as raw bfloat16 bit patterns (no widening)
+// when it is stored as BF16, so a large table that is only gathered from —
+// an embedding table — can stay at half the memory of float32. ok is false
+// when the tensor is stored in another dtype; the caller then uses F32.
+func (r *Reader) BF16(name string, wantShape ...int) (vals []uint16, ok bool, err error) {
+	e, found := r.entries[name]
+	if !found {
+		return nil, false, fmt.Errorf("safetensors: missing tensor %q", name)
+	}
+	if e.dtype != "BF16" {
+		return nil, false, nil
+	}
+	n := 1
+	if len(e.shape) != len(wantShape) {
+		return nil, false, fmt.Errorf("safetensors: tensor %q shape %v, want %v", name, e.shape, wantShape)
+	}
+	for i, d := range wantShape {
+		if e.shape[i] != d {
+			return nil, false, fmt.Errorf("safetensors: tensor %q shape %v, want %v", name, e.shape, wantShape)
+		}
+		n *= d
+	}
+	if n*2 != len(e.buf) {
+		return nil, false, fmt.Errorf("safetensors: tensor %q byte length %d != %d elems × 2", name, len(e.buf), n)
+	}
+	vals = make([]uint16, n)
+	for i := range vals {
+		vals[i] = binary.LittleEndian.Uint16(e.buf[i*2:])
+	}
+	return vals, true, nil
+}
+
 // F32 widens tensor `name` to a fresh float32 slice (the only allocation is
 // that slice). It returns an error if the shape does not match wantShape.
 func (r *Reader) F32(name string, wantShape ...int) ([]float32, error) {

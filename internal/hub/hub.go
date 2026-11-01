@@ -59,9 +59,9 @@ func tokenizerFiles(modelType, tokenizerClass string) (files []string, probe boo
 		// no sentencepiece probe.
 		return []string{"tokenizer.json"}, false
 	}
-	if modelType == "gemma3_text" || modelType == "gemma3" {
-		// EmbeddingGemma: SentencePiece-style byte-fallback BPE, all in
-		// tokenizer.json; no sentencepiece.bpe.model probe.
+	if modelType == "gemma3_text" || modelType == "gemma3" || modelType == "embedding_gemma2" || modelType == "embedding_gemma2_text" {
+		// EmbeddingGemma (1 and 2): SentencePiece-style byte-fallback BPE,
+		// all in tokenizer.json; no sentencepiece.bpe.model probe.
 		return []string{"tokenizer.json"}, false
 	}
 	if modelType == "nomic_bert" {
@@ -76,7 +76,7 @@ func tokenizerFiles(modelType, tokenizerClass string) (files []string, probe boo
 // cannot import internal/model (which would invert the dependency).
 func supported(modelType string) bool {
 	switch modelType {
-	case "bert", "distilbert", "modernbert", "qwen3", "gemma3_text", "gemma3", "nomic_bert", "roberta", "xlm-roberta", "mpnet":
+	case "bert", "distilbert", "modernbert", "qwen3", "gemma3_text", "gemma3", "embedding_gemma2", "embedding_gemma2_text", "nomic_bert", "roberta", "xlm-roberta", "mpnet":
 		return true
 	}
 	return false
@@ -150,7 +150,7 @@ func Ensure(modelID, cacheDir string) (string, error) {
 	}
 	if !supported(hf.ModelType) {
 		cleanup("config.json")
-		return "", fmt.Errorf("hub: %s: model_type %q is not supported (rembed runs bert, distilbert, modernbert, qwen3, gemma3, roberta, xlm-roberta, and mpnet encoders)", modelID, hf.ModelType)
+		return "", fmt.Errorf("hub: %s: model_type %q is not supported (rembed runs bert, distilbert, modernbert, qwen3, gemma3, embedding_gemma2, nomic_bert, roberta, xlm-roberta, and mpnet encoders)", modelID, hf.ModelType)
 	}
 	fetched := []string{"config.json"}
 	if err := fetch(modelID, "tokenizer_config.json", dir); err != nil {

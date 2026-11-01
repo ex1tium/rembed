@@ -75,6 +75,30 @@ type Config struct {
 	SlidingWindowPattern int `json:"sliding_window_pattern,omitempty"`
 	QueryPreAttnScalar   int `json:"query_pre_attn_scalar,omitempty"`
 	DenseHidden          int `json:"dense_hidden,omitempty"`
+
+	// EmbeddingGemma 2 (embedding_gemma2) only. A Gemma 4 text backbone run
+	// as a bidirectional embedder. Layers are NOT uniform: LayerGlobal marks
+	// the full-attention layers (GlobalRopeTheta), the rest attend within
+	// |i−j| ≤ SlidingWindow (inclusive, unlike gemma3's exclusive bound) with
+	// LocalRopeTheta, and each layer carries its own head_dim and kv-head
+	// count (LayerHeadDim, LayerKVHeads). PerLayerInputDim is the width of
+	// the per-layer input (PLE) slice each layer receives; EmbeddingDim is
+	// the output width after the final projection (≠ HiddenSize).
+	LayerGlobal      []bool `json:"layer_global,omitempty"`
+	LayerHeadDim     []int  `json:"layer_head_dim,omitempty"`
+	LayerKVHeads     []int  `json:"layer_kv_heads,omitempty"`
+	PerLayerInputDim int    `json:"per_layer_input_dim,omitempty"`
+	EmbeddingDim     int    `json:"embedding_dim,omitempty"`
+}
+
+// OutputDim is the length of the pooled sentence vector: EmbeddingDim when
+// the architecture projects after the backbone (EmbeddingGemma 2), else
+// HiddenSize.
+func (c *Config) OutputDim() int {
+	if c.EmbeddingDim > 0 {
+		return c.EmbeddingDim
+	}
+	return c.HiddenSize
 }
 
 // PositionOffset is the value added to a token's index to form its
@@ -196,6 +220,10 @@ func validate(c *Config, source string) error {
 		if c.DenseHidden < 1 {
 			return fmt.Errorf("%s: gemma3 requires a positive dense_hidden (found %d)", source, c.DenseHidden)
 		}
+	case "embedding_gemma2":
+		if err := validateEmbeddingGemma2(c, source); err != nil {
+			return err
+		}
 	case "roberta":
 		// Unlike MPNet, HF's RoBERTa reads padding_idx from config — but
 		// zero is refused deliberately: PadTokenID is a plain int, so a
@@ -223,7 +251,7 @@ func validate(c *Config, source string) error {
 			return fmt.Errorf("%s: pad_token_id=%d — HF's MPNet embeddings hardcode padding_idx=1 regardless of config, so rembed only accepts 1", source, c.PadTokenID)
 		}
 	default:
-		return fmt.Errorf("%s: model_type %q unsupported (bert, distilbert, modernbert, qwen3, gemma3, nomic_bert, roberta, or mpnet)", source, c.ModelType)
+		return fmt.Errorf("%s: model_type %q unsupported (bert, distilbert, modernbert, qwen3, gemma3, embedding_gemma2, nomic_bert, roberta, or mpnet)", source, c.ModelType)
 	}
 	if c.LayerNormEps == 0 {
 		c.LayerNormEps = 1e-12

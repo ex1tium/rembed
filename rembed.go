@@ -43,7 +43,7 @@ type Embedder struct {
 	cfg model.Config
 	tok textTokenizer
 	m   *model.Model
-	dim int // output dimensionality (cfg.HiddenSize, or the WithDim truncation)
+	dim int // output dimensionality (cfg.OutputDim(), or the WithDim truncation)
 }
 
 // Option configures Load.
@@ -220,7 +220,7 @@ func Load(ref string, opts ...Option) (*Embedder, error) {
 			return nil, fmt.Errorf("rembed: tokenizer has %d ids but the model has %d embedding rows — mismatched model dir", tok.VocabSize(), cfg.VocabSize)
 		}
 	case cfg.Tokenizer == "gemma":
-		// EmbeddingGemma's embed table and tokenizer vocab are both 262144;
+		// EmbeddingGemma's (1 and 2) embed table and tokenizer vocab are both 262144;
 		// keep the one-sided check (a negative or large gap means a mismatched
 		// tokenizer.json), tolerant of small padding.
 		if gap := cfg.VocabSize - tok.VocabSize(); gap < 0 || gap > 128 {
@@ -259,10 +259,10 @@ func Load(ref string, opts ...Option) (*Embedder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rembed: %w", err)
 	}
-	dim := cfg.HiddenSize
+	dim := cfg.OutputDim()
 	if o.dim != 0 {
-		if o.dim < 1 || o.dim > cfg.HiddenSize {
-			return nil, fmt.Errorf("rembed: WithDim(%d) out of range [1, %d]", o.dim, cfg.HiddenSize)
+		if o.dim < 1 || o.dim > dim {
+			return nil, fmt.Errorf("rembed: WithDim(%d) out of range [1, %d]", o.dim, dim)
 		}
 		dim = o.dim
 	}

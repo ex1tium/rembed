@@ -100,6 +100,20 @@ type Model struct {
 	// typeEmb, and embLNg/embLNb are reused for the embeddings.
 	nmLayers []nmLayer
 
+	// EmbeddingGemma 2 path (cfg.ModelType == "embedding_gemma2"); nil
+	// otherwise. A Gemma 4 text backbone — see gemma2emb.go. The token table
+	// is wordEmbBF16 (raw bfloat16, widened per gathered row) or wordEmb when
+	// the checkpoint stores float32; finalNormG is the trailing RMSNorm.
+	// eg2PLEProj maps the scaled embeddings to every layer's input slice,
+	// eg2PLENorm normalizes each slice, eg2EmbProj ([E×H]) projects the
+	// pooled vector, and eg2Ones is the weightless V-norm's unit gamma.
+	eg2Layers   []eg2Layer
+	wordEmbBF16 []uint16
+	eg2PLEProj  denseWeight
+	eg2PLENorm  []float32
+	eg2EmbProj  []float32
+	eg2Ones     []float32
+
 	// pack is the mmapped disk-weights file when the model was loaded with
 	// WithDiskWeights (nil otherwise); Close unmaps it. Weight slices alias
 	// this mapping, so it must outlive every Forward.
@@ -208,6 +222,11 @@ type scratch struct {
 	qwAcc  []float32 // [nq×flashBlk×dh]
 	qwM    []float32 // [nq×flashBlk]
 	qwL    []float32 // [nq×flashBlk]
+
+	// EmbeddingGemma 2 buffers: every layer's per-layer input slices
+	// [mPad×L·P] and the PLE gate output [mPad×P].
+	eg2PLE  []float32
+	eg2Gate []float32
 }
 
 // grow reslices buf to n floats, reallocating only when capacity is short.
@@ -309,6 +328,12 @@ func Load(weightsPath string, cfg Config, quantize QuantMode, workers int) (*Mod
 	// Qwen3-4B/8B ship) loads into RAM through the same path as a single
 	// model.safetensors — the RAM path must not be broken for exactly the
 	// large models the hub now fetches sharded.
+	if cfg.ModelType == "embedding_gemma2" {
+		// EmbeddingGemma 2: the checkpoint also carries vision and audio
+		// towers, so the text tensors are read on demand from the mmap
+		// instead of decoding the whole file — see gemma2emb.go.
+		return loadEmbeddingGemma2(weightsPath, cfg, quantize, workers)
+	}
 	tensors, err := safetensors.LoadAny(weightsPath)
 	if err != nil {
 		return nil, err
@@ -551,6 +576,14 @@ func (m *Model) Quantized() bool {
 		}
 		return len(m.gmLayers) > 0
 	}
+	if m.eg2Layers != nil {
+		for _, w := range m.eg2Weights() {
+			if w.packed8 == nil && w.packed8v == nil {
+				return false
+			}
+		}
+		return true
+	}
 	if m.nmLayers != nil {
 		for i := range m.nmLayers {
 			l := &m.nmLayers[i]
@@ -609,6 +642,14 @@ func (m *Model) QuantizedActivations() bool {
 			}
 		}
 		return len(m.gmLayers) > 0
+	}
+	if m.eg2Layers != nil {
+		for _, w := range m.eg2Weights() {
+			if w.packed8v == nil {
+				return false
+			}
+		}
+		return true
 	}
 	if m.nmLayers != nil {
 		for i := range m.nmLayers {
@@ -682,6 +723,10 @@ func (m *Model) ForwardWorkers(ids []int64, workers int) ([]float32, error) {
 	if m.gmLayers != nil {
 		pooled = m.applyGemmaDenseHead(pooled)
 	}
+	// EmbeddingGemma 2 projects the pooled H-vector to EmbeddingDim.
+	if m.eg2Layers != nil {
+		pooled = m.eg2Project(pooled)
+	}
 	if m.cfg.Normalize {
 		tensor.L2Normalize(pooled)
 	}
@@ -720,6 +765,14 @@ func (m *Model) ForwardTokensWorkers(ids []int64, workers int) ([][]float32, err
 	defer m.scratchPool.Put(s)
 	seq, H := len(ids), m.cfg.HiddenSize
 	out := make([][]float32, seq)
+	if m.eg2Layers != nil {
+		// EmbeddingGemma 2's last_hidden_state is the per-token projection
+		// to EmbeddingDim (the model applies it before pooling).
+		for i := range out {
+			out[i] = m.eg2Project(s.x[i*H : i*H+H])
+		}
+		return out, nil
+	}
 	flat := make([]float32, seq*H)
 	copy(flat, s.x[:seq*H])
 	for i := range out {
@@ -756,6 +809,9 @@ func (m *Model) encodeWorkers(ids []int64, workers int) (*scratch, error) {
 	}
 	if m.nmLayers != nil {
 		return m.encodeNomic(ids, workers)
+	}
+	if m.eg2Layers != nil {
+		return m.encodeEmbeddingGemma2(ids, workers)
 	}
 	H := m.cfg.HiddenSize
 	heads := m.cfg.NumAttentionHeads

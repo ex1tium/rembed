@@ -53,3 +53,18 @@ func TestCacheDir(t *testing.T) {
 		t.Fatalf("dir=%q err=%v", dir, err)
 	}
 }
+
+// TestEmbeddingGemma2Fetchable pins that the hub accepts EmbeddingGemma 2
+// (both the multimodal and the text-only model_type) and fetches its
+// tokenizer.json without probing for a SentencePiece model.
+func TestEmbeddingGemma2Fetchable(t *testing.T) {
+	for _, mt := range []string{"embedding_gemma2", "embedding_gemma2_text"} {
+		if !supported(mt) {
+			t.Errorf("supported(%q) = false", mt)
+		}
+		files, probe := tokenizerFiles(mt, "GemmaTokenizer")
+		if len(files) != 1 || files[0] != "tokenizer.json" || probe {
+			t.Errorf("tokenizerFiles(%q) = %v, probe=%v; want [tokenizer.json], no probe", mt, files, probe)
+		}
+	}
+}

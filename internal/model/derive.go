@@ -100,6 +100,11 @@ func DeriveConfig(dir, name string) (Config, error) {
 	if err := readJSON("config.json", &hf); err != nil {
 		return c, err
 	}
+	if hf.ModelType == "embedding_gemma2" || hf.ModelType == "embedding_gemma2_text" {
+		// EmbeddingGemma 2 nests its text backbone under text_config and
+		// carries a per-layer schedule; it has its own derivation.
+		return deriveEmbeddingGemma2(dir, name)
+	}
 	if hf.ModelType == "distilbert" {
 		// Fold DistilBERT's key names into the BERT ones so the rest of
 		// the derivation (and validate) sees one shape of config.
@@ -233,7 +238,7 @@ func DeriveConfig(dir, name string) (Config, error) {
 			return c, fmt.Errorf("model dir %s: mpnet config.json lacks pad_token_id", dir)
 		}
 	default:
-		return c, fmt.Errorf("model dir %s: model_type=%q — rembed supports bert, distilbert, modernbert, qwen3, gemma3, nomic_bert, roberta, xlm-roberta, and mpnet encoders", dir, hf.ModelType)
+		return c, fmt.Errorf("model dir %s: model_type=%q — rembed supports bert, distilbert, modernbert, qwen3, gemma3, embedding_gemma2, nomic_bert, roberta, xlm-roberta, and mpnet encoders", dir, hf.ModelType)
 	}
 	// qwen3 and nomic_bert use SwiGLU (silu), validated in their cases above;
 	// the encoders' exact-GELU requirement does not apply to them.
@@ -259,13 +264,11 @@ func DeriveConfig(dir, name string) (Config, error) {
 		return c, err
 	}
 
-	var pooling map[string]any
-	if err := readJSON("1_Pooling/config.json", &pooling); err != nil {
-		return c, fmt.Errorf("model dir %s: no 1_Pooling/config.json — not sentence-transformers format: %w", dir, err)
-	}
-	mode, err := poolingMode(pooling)
+	// EmbeddingGemma's two-layer bias-free projection head (2_Dense/,
+	// 3_Dense/) is the only Dense module rembed loads (in loadGemma3).
+	mode, normalize, err := stPipeline(dir, hf.ModelType == "gemma3")
 	if err != nil {
-		return c, fmt.Errorf("model dir %s: %w", dir, err)
+		return c, err
 	}
 
 	// XLM-R-family repos ship a SentencePiece model even on a plain BERT
@@ -306,29 +309,6 @@ func DeriveConfig(dir, name string) (Config, error) {
 			return c, fmt.Errorf("model dir %s: tokenizer_config.json does not set do_lower_case — set it there or provide a manifest.json", dir)
 		}
 		doLower = *tok.DoLowerCase
-	}
-
-	// modules.json is required: silently assuming "no Normalize module"
-	// for a repo that has one would shift every downstream cosine
-	// threshold (convert.py enforces the same).
-	normalize := false
-	var modules []struct {
-		Type string `json:"type"`
-	}
-	if err := readJSON("modules.json", &modules); err != nil {
-		return c, fmt.Errorf("model dir %s: modules.json: %w", dir, err)
-	}
-	for _, m := range modules {
-		switch {
-		case strings.HasSuffix(m.Type, "models.Normalize"):
-			normalize = true
-		case strings.HasSuffix(m.Type, "models.Transformer"), strings.HasSuffix(m.Type, "models.Pooling"):
-		case strings.HasSuffix(m.Type, "models.Dense") && hf.ModelType == "gemma3":
-			// EmbeddingGemma's two-layer bias-free projection head, loaded
-			// from 2_Dense/ and 3_Dense/ in loadGemma3.
-		default:
-			return c, fmt.Errorf("model dir %s: unsupported sentence-transformers module %q", dir, m.Type)
-		}
 	}
 
 	c = Config{
@@ -466,11 +446,74 @@ func gemmaDenseHidden(dir string) (int, error) {
 	return d.OutFeatures, nil
 }
 
+// stPipeline reads the sentence-transformers module stack: the pooling mode
+// from 1_Pooling/config.json and whether a Normalize module follows, from
+// modules.json. allowDense admits Dense modules (EmbeddingGemma's head).
+//
+// modules.json is required: silently assuming "no Normalize module" for a
+// repo that has one would shift every downstream cosine threshold
+// (convert.py enforces the same). Module types are matched on their class
+// name, so both the classic "sentence_transformers.models.Normalize" and
+// the sentence-transformers 6 spelling
+// "sentence_transformers.base.modules.normalize.Normalize" are recognized.
+func stPipeline(dir string, allowDense bool) (mode string, normalize bool, err error) {
+	var pooling map[string]any
+	raw, err := os.ReadFile(filepath.Join(dir, "1_Pooling", "config.json"))
+	if err != nil {
+		return "", false, fmt.Errorf("model dir %s: no 1_Pooling/config.json — not sentence-transformers format: %w", dir, err)
+	}
+	if err := json.Unmarshal(raw, &pooling); err != nil {
+		return "", false, fmt.Errorf("model dir %s: 1_Pooling/config.json: %w", dir, err)
+	}
+	if mode, err = poolingMode(pooling); err != nil {
+		return "", false, fmt.Errorf("model dir %s: %w", dir, err)
+	}
+
+	var modules []struct {
+		Type string `json:"type"`
+	}
+	raw, err = os.ReadFile(filepath.Join(dir, "modules.json"))
+	if err != nil {
+		return "", false, fmt.Errorf("model dir %s: modules.json: %w", dir, err)
+	}
+	if err := json.Unmarshal(raw, &modules); err != nil {
+		return "", false, fmt.Errorf("model dir %s: modules.json: %w", dir, err)
+	}
+	for _, m := range modules {
+		switch class := m.Type[strings.LastIndex(m.Type, ".")+1:]; {
+		case class == "Normalize":
+			normalize = true
+		case class == "Transformer", class == "Pooling":
+		case class == "Dense" && allowDense:
+		default:
+			return "", false, fmt.Errorf("model dir %s: unsupported sentence-transformers module %q", dir, m.Type)
+		}
+	}
+	return mode, normalize, nil
+}
+
 // poolingMode maps a 1_Pooling/config.json onto rembed's pooling
 // strategies. The check is an ALLOWLIST over every pooling_mode_* key —
 // truthy in the JSON sense, so a future or nonstandard mode (or "1"
 // instead of true) refuses loudly instead of being silently ignored.
+// sentence-transformers 6 writes a single "pooling_mode" string instead
+// ("mean", "cls", "lasttoken"); include_prompt=false (pooling that skips
+// the instruction prefix) is refused because rembed pools every token.
 func poolingMode(p map[string]any) (string, error) {
+	if v, ok := p["include_prompt"]; ok {
+		if b, isBool := v.(bool); isBool && !b {
+			return "", fmt.Errorf("unsupported pooling config include_prompt=false (rembed pools every token)")
+		}
+	}
+	if v, ok := p["pooling_mode"]; ok {
+		s, _ := v.(string)
+		switch s {
+		case "mean", "cls", "lasttoken":
+			return s, nil
+		default:
+			return "", fmt.Errorf("unsupported pooling mode %v (rembed supports mean, cls, or lasttoken)", v)
+		}
+	}
 	truthy := func(v any) bool {
 		switch x := v.(type) {
 		case bool:

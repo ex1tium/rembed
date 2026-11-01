@@ -1,8 +1,9 @@
 # Supported models
 
-rembed covers eight model architectures — six BERT-style encoders (BERT,
+rembed covers nine model architectures — six BERT-style encoders (BERT,
 DistilBERT, MPNet, RoBERTa including XLM-RoBERTa, ModernBERT, nomic-embed) and
-two decoder-derived embedders (Qwen3-Embedding and EmbeddingGemma) — across four
+three decoder-derived embedders (Qwen3-Embedding, EmbeddingGemma, and
+EmbeddingGemma 2's text path) — across four
 tokenizer families (WordPiece, byte-level BPE, SentencePiece Unigram, Gemma
 byte-fallback BPE).
 Pass any of them to [`Load`](usage.md#loading-a-model) by Hugging Face id.
@@ -34,6 +35,7 @@ the weight-only int8 path vs fp32.
 | `nomic-ai/nomic-embed-text-v1.5` | mean | < 1e-4 | ≥ 0.996 |
 | `Qwen/Qwen3-Embedding-0.6B` | last-token | < 1e-4 | ≥ 0.997 |
 | `google/embeddinggemma-300m` | mean + Dense | < 1e-4 | ≥ 0.998 |
+| `google/embeddinggemma-2` (text) | mean + projection | < 1e-4 | ≥ 0.9994 |
 
 ¹ `gte-small` ships as F16 weights: 2e-3 max-abs, but cosine ≥ 0.9999 and mean
 abs ≤ 2e-4.

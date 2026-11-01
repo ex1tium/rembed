@@ -13,13 +13,25 @@ import (
 // tokenizer.json ($REMBED_MODEL_GEMMA in CI, or the convert.py dir).
 func gemmaTok(t *testing.T) *Tokenizer {
 	t.Helper()
-	dir := os.Getenv("REMBED_MODEL_GEMMA")
+	return loadTok(t, "REMBED_MODEL_GEMMA", "embeddinggemma-300m", "models/gemma_fixture.py for google/embeddinggemma-300m")
+}
+
+// gemma2Tok loads the EmbeddingGemma 2 tokenizer ($REMBED_MODEL_GEMMA2, or
+// models/embeddinggemma-2).
+func gemma2Tok(t *testing.T) *Tokenizer {
+	t.Helper()
+	return loadTok(t, "REMBED_MODEL_GEMMA2", "embeddinggemma-2", "models/gemma2_golden.py for google/embeddinggemma-2")
+}
+
+func loadTok(t *testing.T, env, defaultDir, hint string) *Tokenizer {
+	t.Helper()
+	dir := os.Getenv(env)
 	if dir == "" {
-		dir = filepath.Join("..", "..", "models", "embeddinggemma-300m")
+		dir = filepath.Join("..", "..", "models", defaultDir)
 	}
 	path := filepath.Join(dir, "tokenizer.json")
 	if _, err := os.Stat(path); err != nil {
-		t.Skipf("tokenizer.json not present (%v) — run models/gemma_fixture.py for google/embeddinggemma-300m", err)
+		t.Skipf("tokenizer.json not present (%v) — run %s", err, hint)
 	}
 	tok, err := New(path)
 	if err != nil {
@@ -40,8 +52,18 @@ type fixture struct {
 // HF's tokenizer over the committed fixture (metaspace normalization, byte
 // fallback, whole-string merges, and the <bos>…<eos> framing).
 func TestGemmaFixtureAgainstHF(t *testing.T) {
-	tok := gemmaTok(t)
-	raw, err := os.ReadFile(filepath.Join("testdata", "gemma_fixture.json"))
+	checkFixture(t, gemmaTok(t), "gemma_fixture.json")
+}
+
+// TestGemma2FixtureAgainstHF does the same for EmbeddingGemma 2's Gemma 4
+// tokenizer (same byte-fallback BPE family, its own vocab and merges).
+func TestGemma2FixtureAgainstHF(t *testing.T) {
+	checkFixture(t, gemma2Tok(t), "gemma2_fixture.json")
+}
+
+func checkFixture(t *testing.T, tok *Tokenizer, file string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", file))
 	if err != nil {
 		t.Fatal(err)
 	}

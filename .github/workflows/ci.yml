@@ -95,7 +95,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/rembed
-          key: rembed-models-v9
+          key: rembed-models-v10
       - name: fetch models via the hub loader
         env:
           # EmbeddingGemma is gated: set repo secret HF_TOKEN to a token whose
@@ -114,6 +114,8 @@ jobs:
           go run ./cmd/rembed embed -model nomic-ai/modernbert-embed-base "warm" > /dev/null
           go run ./cmd/rembed embed -model Qwen/Qwen3-Embedding-0.6B "warm" > /dev/null
           go run ./cmd/rembed embed -model nomic-ai/nomic-embed-text-v1.5 "warm" > /dev/null
+          # EmbeddingGemma 2 is Apache-2.0 and ungated (no HF_TOKEN needed).
+          go run ./cmd/rembed embed -model google/embeddinggemma-2 "warm" > /dev/null
           if [ -n "$HF_TOKEN" ]; then
             go run ./cmd/rembed embed -model google/embeddinggemma-300m "warm" > /dev/null
           fi
@@ -132,6 +134,7 @@ jobs:
           # EmbeddingGemma: present only when HF_TOKEN was set above; the
           # golden and tokenizer tests skip when the dir is absent.
           export REMBED_MODEL_GEMMA=~/.cache/rembed/google--embeddinggemma-300m
+          export REMBED_MODEL_GEMMA2=~/.cache/rembed/google--embeddinggemma-2
           go test -v -run "Golden|SteadyState|Concurrent|WithWorkers|Batch|Tokens" . 2>&1 | tail -30
           go test -run "Golden|SteadyState|Concurrent|WithWorkers|Batch|Tokens" .
           # The BPE fixture needs real vocab/merges files; the hub cache

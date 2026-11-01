@@ -851,6 +851,14 @@ func TestGoldenMatrix(t *testing.T) {
 		// with the explicit ST pooling+dense+normalize pipeline.
 		// int8 worst 0.998140, full int8 worst 0.993849 (measured), less margin.
 		{"testdata/golden-embeddinggemma-300m.json", "models/embeddinggemma-300m", "REMBED_MODEL_GEMMA", 1e-4, 0, 1e-5, 0.998, 0.99},
+		// EmbeddingGemma 2: the ninth architecture — a bidirectional Gemma 4
+		// text backbone (plain-weight RMSNorm, QK-norm plus a weightless V-norm,
+		// unscaled attention, per-layer head_dim/kv-heads, dual-theta RoPE, a
+		// symmetric |i−j| ≤ 512 window on sliding layers, per-layer inputs and
+		// layer scalars) plus mean pooling and a 512→768 projection. Reference is
+		// the published sentence-transformers stack in fp32 (models/gemma2_golden.py).
+		// int8 worst 0.999621, full int8 worst 0.996052 (measured), less margin.
+		{"testdata/golden-embeddinggemma-2.json", "models/embeddinggemma-2", "REMBED_MODEL_GEMMA2", 1e-4, 0, 1e-5, 0.9994, 0.995},
 		// nomic-embed: the eighth architecture — a post-norm BERT-style encoder
 		// with RoPE (no learned positions), bias-free SwiGLU, LayerNorm, and
 		// token_type embeddings, bidirectional. Reference is the repo's own
@@ -966,14 +974,26 @@ func TestGoldenMatrix(t *testing.T) {
 // applied to the reference — so both the truncation math and the underlying
 // full vector are correct.
 func TestGoldenMatryoshka(t *testing.T) {
-	dir := os.Getenv("REMBED_MODEL_GEMMA")
+	for _, tc := range []struct{ golden, dir, env string }{
+		{"testdata/golden-embeddinggemma-300m.json", "models/embeddinggemma-300m", "REMBED_MODEL_GEMMA"},
+		// EmbeddingGemma 2: the same MRL sizes over its 768-d projection.
+		{"testdata/golden-embeddinggemma-2.json", "models/embeddinggemma-2", "REMBED_MODEL_GEMMA2"},
+	} {
+		t.Run(filepath.Base(tc.dir), func(t *testing.T) {
+			goldenMatryoshka(t, tc.golden, tc.dir, tc.env)
+		})
+	}
+}
+
+func goldenMatryoshka(t *testing.T, goldenPath, defaultDir, env string) {
+	dir := os.Getenv(env)
 	if dir == "" {
-		dir = "models/embeddinggemma-300m"
+		dir = defaultDir
 	}
 	if _, err := os.Stat(dir + "/model.safetensors"); err != nil {
 		t.Skipf("model dir %s not present", dir)
 	}
-	raw, err := os.ReadFile("testdata/golden-embeddinggemma-300m.json")
+	raw, err := os.ReadFile(goldenPath)
 	if err != nil {
 		t.Fatal(err)
 	}

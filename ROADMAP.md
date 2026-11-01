@@ -353,6 +353,31 @@ Refuse-guards reject the NTK rotary scaling that extends v1.5 to 8k (only
 unscaled RoPE up to max_position_embeddings), plus prenorm/causal/RMSNorm
 variants. CI fetches it via the hub loader (not gated).
 
+## R15 — EmbeddingGemma 2 (Gemma 4 bidirectional embedder, text path) ✅
+Done: the ninth architecture. `google/embeddinggemma-2` (Apache-2.0, ungated)
+nests its Gemma 4 text backbone under `text_config` beside vision and audio
+towers. rembed derives the per-layer schedule (`layer_types`,
+`per_layer_config`: the four full-attention layers use head_dim 512 with one
+kv head, sliding layers 256 with two), reads only `language_model.*` from
+the mmap (towers never decoded; the token table stays BF16, 256 MB instead
+of 512), and runs: √H-scaled embeddings; per-layer inputs — one
+512→24·512 projection of the embeddings, scaled 1/√H and RMS-normed per
+slice; then per layer the attention sublayer (q/k-norm, weightless v-norm,
+RoPE θ=1e4/1e6 by layer type, attention scale 1.0, GQA, symmetric inclusive
+|i−j| ≤ 512 window on sliding layers), the GeGLU MLP, the PLE block
+(gelu_tanh(gate(h))·slice → projection → post-norm → residual) and the
+learned layer scalar; final norm, mean pooling, 512→768 projection.
+Differences from R13 the reference settled: norms are plain-weight (no unit
+offset), the window is |i−j| ≤ 512 (not < 257), and `layer_scalar` must be
+loaded (0.11–0.97, not 1).
+
+Validated: fp32 maxAbs < 1e-4 against the published sentence-transformers
+stack (PyTorch, fp32) over 20 cases including Finnish text and a 1218-token
+input; tokenizer token-for-token over the Gemma fixture battery; int8 worst
+cosine 0.999621 (weight-only) / 0.996052 (full int8), bounds enforced;
+Matryoshka 512/256/128. Attention fans out over (head, 64-row block) units —
+with four heads, per-head units left most cores idle on long inputs.
+
 ## Standing rules
 Every rung: golden validation against an independent reference, its own
 benchmark delta where perf-relevant, an adversarial review pass before

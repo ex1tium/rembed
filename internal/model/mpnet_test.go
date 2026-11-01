@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -125,7 +126,7 @@ func TestManifestRoundTripMPNet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != cfg {
+	if !reflect.DeepEqual(got, cfg) {
 		t.Fatalf("round trip changed config:\n got %+v\nwant %+v", got, cfg)
 	}
 }

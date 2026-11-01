@@ -7,6 +7,26 @@ model where an ONNX export is unavailable).
 
 ## Unreleased
 
+- **EmbeddingGemma 2** (`google/embeddinggemma-2`, text path): the ninth
+  architecture — a bidirectional Gemma 4 backbone with per-layer head
+  shapes (full-attention layers use head_dim 512 and one kv head),
+  plain-weight RMSNorm, QK-norm plus a weightless V-norm, unscaled
+  attention, a symmetric inclusive |i−j| ≤ 512 window on sliding layers,
+  per-layer inputs (PLE) and learned layer scalars, then mean pooling and a
+  512→768 projection. Only the text tensors are read from the multimodal
+  checkpoint (vision/audio towers are skipped, never decoded) and the
+  262144×512 token table stays BF16. Validated against the published
+  sentence-transformers stack in PyTorch at fp32 maxAbs < 1e-4 over 20 cases
+  (including a 1218-token input past the window); int8 worst cosine 0.9996
+  (weight-only) / 0.9960 (full int8); Apache-2.0 and ungated, so CI fetches
+  it without `HF_TOKEN`.
+- DeriveConfig reads sentence-transformers 6 exports: module class names
+  under `sentence_transformers.base.modules.*` and the single
+  `pooling_mode` string in `1_Pooling/config.json` (`include_prompt=false`
+  is refused — rembed pools every token).
+- `GELUTanh` evaluates x·σ(2u) with the float32 `expNonPos` instead of
+  float64 `math.Tanh` (~25% of an EmbeddingGemma forward pass), within
+  1.3e-7 of the float64 definition.
 - **nomic-embed** (`nomic-embed-text-v1.5`): the eighth architecture — a
   post-norm BERT encoder with RoPE, gated SwiGLU, and token_type
   embeddings, bias-free. Validated against its own ONNX export at fp32
