@@ -495,9 +495,14 @@ func GELUTanh(x []float32) {
 	const c = float32(0.7978845608028654) // √(2/π)
 	for i, v := range x {
 		u := c * (v + 0.044715*v*v*v)
-		if u >= 0 {
+		switch {
+		case u >= 0:
 			x[i] = v / (1 + expNonPos(-2*u))
-		} else {
+		case u < -44:
+			// σ(2u) < 1e-38: the activation is 0 to float32 precision, and
+			// v·e would turn an infinite v into -Inf instead of the limit 0.
+			x[i] = 0
+		default:
 			e := expNonPos(2 * u)
 			x[i] = v * e / (1 + e)
 		}

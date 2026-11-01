@@ -252,7 +252,6 @@ func (m *Model) encodeEmbeddingGemma2(ids []int64, workers int) (*scratch, error
 	s.qwQHead = grow(s.qwQHead, qDimMax*seq)
 	s.qwCHead = grow(s.qwCHead, qDimMax*seq)
 	s.qwCtx = grow(s.qwCtx, seq*qDimMax)
-	s.scores = grow(s.scores, nq*seq*seq)
 	s.attnOut = grow(s.attnOut, mPad*H)
 	s.wiOut = grow(s.wiOut, mPad*I) // GeGLU gate projection
 	s.qwUp = grow(s.qwUp, mPad*I)   // GeGLU up projection
@@ -276,6 +275,14 @@ func (m *Model) encodeEmbeddingGemma2(ids []int64, workers int) (*scratch, error
 	}
 	s.pool = tensor.NewPool(s.fanout - 1)
 	defer s.pool.Stop()
+	// Attention scores live per worker, one row block at a time
+	// (eg2RowBlk×seq floats each), never as the full heads×seq×seq matrix:
+	// at the 8192-token context that would be ~1 GiB per concurrent forward.
+	s.scores = grow(s.scores, s.fanout*eg2RowBlk*seq)
+	slots := make(chan int, s.fanout)
+	for i := range s.fanout {
+		slots <- i
+	}
 
 	if dhG > 0 {
 		ropeTable(s.cosG, s.sinG, seq, dhG, cfg.GlobalRopeTheta)
@@ -309,7 +316,6 @@ func (m *Model) encodeEmbeddingGemma2(ids []int64, workers int) (*scratch, error
 	kHead, vHeadT := s.qwKHead, s.qwVHead
 	qHead, cHead := s.qwQHead, s.qwCHead
 	ctx := s.qwCtx
-	scores := s.scores
 	attnOut := s.attnOut
 	gate, up, act, down := s.wiOut, s.qwUp, s.geglu, s.ffnOut
 	pg := s.eg2Gate
@@ -374,7 +380,9 @@ func (m *Model) encodeEmbeddingGemma2(ids []int64, workers int) (*scratch, error
 			kH := kHead[kv*seq*dh : (kv+1)*seq*dh]
 			vHT := vHeadT[kv*dh*seq : (kv+1)*dh*seq]
 			chH := cHead[hh*seq*dh+r0*dh : hh*seq*dh+r1*dh]
-			sc := scores[hh*seq*seq+r0*seq : hh*seq*seq+r1*seq]
+			slot := <-slots
+			defer func() { slots <- slot }()
+			sc := s.scores[slot*eg2RowBlk*seq : slot*eg2RowBlk*seq+rows*seq]
 			tensor.MatMulSerial(sc, qH, kH, rows, dh, seq)
 			if !l.global {
 				// Symmetric, inclusive window: a query attends where

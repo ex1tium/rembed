@@ -121,3 +121,27 @@ func TestGELUTanhAgainstFloat64(t *testing.T) {
 	}
 	t.Logf("worst scaled error %.3g", worst)
 }
+
+// TestGELUTanhEdgeCases pins the special values: -0 stays -0, NaN passes
+// through, +Inf stays +Inf, and -Inf and huge negatives go to (signed) zero
+// without overflow.
+func TestGELUTanhEdgeCases(t *testing.T) {
+	negZero := float32(math.Copysign(0, -1))
+	x := []float32{negZero, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1)), -1e30, 1e30}
+	GELUTanh(x)
+	if x[0] != 0 || !math.Signbit(float64(x[0])) {
+		t.Errorf("GELUTanh(-0) = %v, want -0", x[0])
+	}
+	if !math.IsNaN(float64(x[1])) {
+		t.Errorf("GELUTanh(NaN) = %v, want NaN", x[1])
+	}
+	if !math.IsInf(float64(x[2]), 1) {
+		t.Errorf("GELUTanh(+Inf) = %v, want +Inf", x[2])
+	}
+	if math.IsNaN(float64(x[3])) || math.Abs(float64(x[3])) > 1e-30 {
+		t.Errorf("GELUTanh(-Inf) = %v, want ~0", x[3])
+	}
+	if math.IsNaN(float64(x[4])) || math.Abs(float64(x[4])) > 1e-6 || x[5] != 1e30 {
+		t.Errorf("GELUTanh(-1e30, 1e30) = %v, %v", x[4], x[5])
+	}
+}

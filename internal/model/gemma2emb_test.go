@@ -5,6 +5,7 @@ package model
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -148,6 +149,16 @@ func TestDeriveEmbeddingGemma2Refusals(t *testing.T) {
 		{"pooling mode", nil, `{"pooling_mode": "max"}`, "", "unsupported pooling mode"},
 		{"cls pooling", nil, `{"pooling_mode": "cls"}`, "", "requires mean pooling"},
 		{"dense module", nil, "", `[{"type": "sentence_transformers.models.Dense"}]`, "unsupported sentence-transformers module"},
+		{"custom module", nil, "", `[{"type": "custom_st.Transformer"}, {"type": "sentence_transformers.models.Pooling"}]`, "not a sentence_transformers module"},
+		{"include_prompt string false", nil, `{"pooling_mode": "mean", "include_prompt": "false"}`, "", "include_prompt=false"},
+		{"pooling spellings disagree", nil, `{"pooling_mode": "mean", "pooling_mode_cls_token": true}`, "", "contradicts pooling_mode_cls_token"},
+		{"duplicate per_layer key", func(c map[string]any) {
+			c["per_layer_config"] = map[string]any{"1": map[string]any{"head_dim": 16, "num_key_value_heads": 1}, "01": map[string]any{"head_dim": 16, "num_key_value_heads": 1}}
+		}, "", "", "names layer 1 twice"},
+		{"partial rotary", func(c map[string]any) { c["partial_rotary_factor"] = 0.25 }, "", "", "partial_rotary_factor"},
+		{"kv sharing", func(c map[string]any) { c["num_kv_shared_layers"] = 4 }, "", "", "num_kv_shared_layers"},
+		{"causal", func(c map[string]any) { c["use_bidirectional_attention"] = false }, "", "", "use_bidirectional_attention=false"},
+		{"pooling dim mismatch", nil, `{"embedding_dimension": 64, "pooling_mode": "mean"}`, "", "embedding_dimension 64 disagrees"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,5 +444,103 @@ func TestEmbeddingGemma2TextOnlyNames(t *testing.T) {
 
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.safetensors"), cfg, QuantNone, 1); err == nil {
 		t.Fatal("missing weights file accepted")
+	}
+}
+
+// TestEmbeddingGemma2ConcurrentWorkers drives the parallel paths — the
+// (head, row-block) attention fan-out, the per-row PLE/GeGLU fan-outs, and
+// the shared scratch pool — from several goroutines with multi-worker
+// fan-outs, and requires bit-identical results to the serial forward. Run
+// under -race this is the concurrency check the serial golden cannot be.
+func TestEmbeddingGemma2ConcurrentWorkers(t *testing.T) {
+	path, cfg := synthEG2(t, nil)
+	serial, err := Load(path, cfg, QuantNone, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallel, err := Load(path, cfg, QuantNone, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Lengths straddle the 64-row attention block so several row blocks
+	// run per head.
+	inputs := [][]int64{}
+	for _, n := range []int{1, 3, 63, 64, 65, 150} {
+		ids := make([]int64, n)
+		for i := range ids {
+			ids[i] = int64(2 + i%29)
+		}
+		inputs = append(inputs, ids)
+	}
+	want := make([][]float32, len(inputs))
+	for i, ids := range inputs {
+		if want[i], err = serial.Forward(ids); err != nil {
+			t.Fatal(err)
+		}
+	}
+	errs := make(chan error, 4*len(inputs))
+	done := make(chan struct{})
+	for g := 0; g < 4; g++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for i, ids := range inputs {
+				got, err := parallel.Forward(ids)
+				if err != nil {
+					errs <- err
+					return
+				}
+				for j := range got {
+					if math.Abs(float64(got[j]-want[i][j])) > 1e-5 {
+						errs <- fmt.Errorf("input %d (len %d): dim %d = %g, serial %g", i, len(ids), j, got[j], want[i][j])
+						return
+					}
+				}
+			}
+		}()
+	}
+	for g := 0; g < 4; g++ {
+		<-done
+	}
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// TestEmbeddingGemma2ConfigDefaults: a missing rms_norm_eps is Gemma's 1e-6
+// (not BERT's 1e-12); the default Gemma 4 knobs are accepted; a head count
+// that does not divide hidden_size is fine (head_dim is explicit); and a
+// manifest that copied the 262144 RoPE horizon is still capped at 8192.
+func TestEmbeddingGemma2ConfigDefaults(t *testing.T) {
+	text := eg2TextCfg()
+	delete(text, "rms_norm_eps")
+	text["partial_rotary_factor"] = 1.0
+	text["num_kv_shared_layers"] = 0
+	text["use_bidirectional_attention"] = true
+	text["num_attention_heads"] = 6
+	text["num_key_value_heads"] = 3
+	text["per_layer_config"] = map[string]any{"1": map[string]any{"head_dim": 16, "num_key_value_heads": 1}}
+	c, err := DeriveConfig(writeEG2Dir(t, text, eg2STPooling, eg2STModules), "eg2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LayerNormEps != 1e-6 {
+		t.Errorf("eps = %g, want Gemma's 1e-6 when rms_norm_eps is missing", c.LayerNormEps)
+	}
+	c.MaxPositionEmbeddings = 262144
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.MaxSeqLen() != eg2MaxSeqLen {
+		t.Errorf("manifest MaxSeqLen = %d, want the %d cap", m.MaxSeqLen(), eg2MaxSeqLen)
 	}
 }

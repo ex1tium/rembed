@@ -138,7 +138,9 @@ func validate(c *Config, source string) error {
 		c.IntermediateSize <= 0 || c.VocabSize <= 0 || c.MaxPositionEmbeddings <= 0 {
 		return fmt.Errorf("%s: missing or non-positive architecture fields: %+v", source, c)
 	}
-	if c.HiddenSize%c.NumAttentionHeads != 0 {
+	// EmbeddingGemma 2 sizes attention by explicit per-layer head_dim, so
+	// hidden_size need not divide by the head count.
+	if c.ModelType != "embedding_gemma2" && c.HiddenSize%c.NumAttentionHeads != 0 {
 		return fmt.Errorf("%s: hidden_size %d not divisible by num_attention_heads %d", source, c.HiddenSize, c.NumAttentionHeads)
 	}
 	if c.Pooling != "mean" && c.Pooling != "cls" && c.Pooling != "lasttoken" {

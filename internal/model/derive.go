@@ -480,6 +480,12 @@ func stPipeline(dir string, allowDense bool) (mode string, normalize bool, err e
 		return "", false, fmt.Errorf("model dir %s: modules.json: %w", dir, err)
 	}
 	for _, m := range modules {
+		// Only sentence-transformers' own modules: a remote-code repo's
+		// custom_st.Transformer (task adapters, custom pooling) shares the
+		// class name but not the behaviour, and must be refused.
+		if !strings.HasPrefix(m.Type, "sentence_transformers.") {
+			return "", false, fmt.Errorf("model dir %s: unsupported sentence-transformers module %q (not a sentence_transformers module)", dir, m.Type)
+		}
 		switch class := m.Type[strings.LastIndex(m.Type, ".")+1:]; {
 		case class == "Normalize":
 			normalize = true
@@ -501,7 +507,7 @@ func stPipeline(dir string, allowDense bool) (mode string, normalize bool, err e
 // the instruction prefix) is refused because rembed pools every token.
 func poolingMode(p map[string]any) (string, error) {
 	if v, ok := p["include_prompt"]; ok {
-		if b, isBool := v.(bool); isBool && !b {
+		if b, isBool := v.(bool); (isBool && !b) || v == "false" || v == "False" {
 			return "", fmt.Errorf("unsupported pooling config include_prompt=false (rembed pools every token)")
 		}
 	}
@@ -509,10 +515,16 @@ func poolingMode(p map[string]any) (string, error) {
 		s, _ := v.(string)
 		switch s {
 		case "mean", "cls", "lasttoken":
-			return s, nil
 		default:
 			return "", fmt.Errorf("unsupported pooling mode %v (rembed supports mean, cls, or lasttoken)", v)
 		}
+		// A config carrying both spellings must agree.
+		for k, legacy := range map[string]string{"pooling_mode_mean_tokens": "mean", "pooling_mode_cls_token": "cls", "pooling_mode_lasttoken": "lasttoken"} {
+			if b, isBool := p[k].(bool); isBool && b && legacy != s {
+				return "", fmt.Errorf("unsupported pooling config: pooling_mode %q contradicts %s", s, k)
+			}
+		}
+		return s, nil
 	}
 	truthy := func(v any) bool {
 		switch x := v.(type) {

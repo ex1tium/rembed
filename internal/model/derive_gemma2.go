@@ -46,6 +46,12 @@ type eg2TextConfig struct {
 	} `json:"rope_parameters"`
 	AttnLogitSoftcapping  *float64 `json:"attn_logit_softcapping"`
 	FinalLogitSoftcapping *float64 `json:"final_logit_softcapping"`
+	// Gemma 4 knobs this path does not implement: refused when set to a
+	// non-default value, so a future variant fails loudly instead of
+	// embedding wrong.
+	PartialRotaryFactor       *float64 `json:"partial_rotary_factor"`
+	NumKVSharedLayers         *int     `json:"num_kv_shared_layers"`
+	UseBidirectionalAttention *bool    `json:"use_bidirectional_attention"`
 }
 
 // deriveEmbeddingGemma2 builds the Config for google/embeddinggemma-2's text
@@ -89,6 +95,15 @@ func deriveEmbeddingGemma2(dir, name string) (Config, error) {
 	if (t.AttnLogitSoftcapping != nil && *t.AttnLogitSoftcapping != 0) || (t.FinalLogitSoftcapping != nil && *t.FinalLogitSoftcapping != 0) {
 		return c, fmt.Errorf("model dir %s: embedding_gemma2 logit softcapping is not supported", dir)
 	}
+	if t.PartialRotaryFactor != nil && *t.PartialRotaryFactor != 1 {
+		return c, fmt.Errorf("model dir %s: embedding_gemma2 partial_rotary_factor=%g is not supported (only full RoPE)", dir, *t.PartialRotaryFactor)
+	}
+	if t.NumKVSharedLayers != nil && *t.NumKVSharedLayers != 0 {
+		return c, fmt.Errorf("model dir %s: embedding_gemma2 num_kv_shared_layers=%d is not supported (no kv sharing)", dir, *t.NumKVSharedLayers)
+	}
+	if t.UseBidirectionalAttention != nil && !*t.UseBidirectionalAttention {
+		return c, fmt.Errorf("model dir %s: embedding_gemma2 use_bidirectional_attention=false is not supported (the embedder is bidirectional)", dir)
+	}
 	if len(t.LayerTypes) != t.NumHiddenLayers {
 		return c, fmt.Errorf("model dir %s: embedding_gemma2 layer_types has %d entries for %d layers", dir, len(t.LayerTypes), t.NumHiddenLayers)
 	}
@@ -118,11 +133,16 @@ func deriveEmbeddingGemma2(dir, name string) (Config, error) {
 		}
 		headDim[i], kvHeads[i] = t.HeadDim, t.NumKeyValueHeads
 	}
+	seen := map[int]string{}
 	for key, pl := range t.PerLayerConfig {
 		i, err := strconv.Atoi(key)
 		if err != nil || i < 0 || i >= n {
 			return c, fmt.Errorf("model dir %s: embedding_gemma2 per_layer_config key %q is not a layer index", dir, key)
 		}
+		if prev, dup := seen[i]; dup {
+			return c, fmt.Errorf("model dir %s: embedding_gemma2 per_layer_config names layer %d twice (%q and %q)", dir, i, prev, key)
+		}
+		seen[i] = key
 		if pl.HeadDim != nil {
 			headDim[i] = *pl.HeadDim
 		}
@@ -172,10 +192,31 @@ func deriveEmbeddingGemma2(dir, name string) (Config, error) {
 		PerLayerInputDim:      t.PerLayerInputDim,
 		EmbeddingDim:          t.EmbeddingDim,
 	}
+	// Gemma's RMSNorm eps defaults to 1e-6 (HF), not the 1e-12 validate
+	// fills in for BERT-family configs.
+	c.LayerNormEps = 1e-6
 	if t.RMSNormEps != nil {
 		c.LayerNormEps = *t.RMSNormEps
 	}
+	if dim, ok := poolingDim(dir); ok && dim != c.EmbeddingDim {
+		return c, fmt.Errorf("model dir %s: 1_Pooling embedding_dimension %d disagrees with embedding_dim %d", dir, dim, c.EmbeddingDim)
+	}
 	return c, validate(&c, dir)
+}
+
+// poolingDim reads 1_Pooling/config.json's embedding_dimension, if present.
+func poolingDim(dir string) (int, bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, "1_Pooling", "config.json"))
+	if err != nil {
+		return 0, false
+	}
+	var p struct {
+		EmbeddingDimension *int `json:"embedding_dimension"`
+	}
+	if json.Unmarshal(raw, &p) != nil || p.EmbeddingDimension == nil {
+		return 0, false
+	}
+	return *p.EmbeddingDimension, true
 }
 
 // validateEmbeddingGemma2 checks the per-layer schedule and the extra
@@ -214,5 +255,8 @@ func validateEmbeddingGemma2(c *Config, source string) error {
 	if c.Pooling != "mean" {
 		return fmt.Errorf("%s: embedding_gemma2 requires mean pooling (found %q)", source, c.Pooling)
 	}
+	// The trained context, whatever the manifest copied from config.json
+	// (262144, the RoPE horizon): longer inputs are truncated, not run.
+	c.MaxPositionEmbeddings = min(c.MaxPositionEmbeddings, eg2MaxSeqLen)
 	return nil
 }
